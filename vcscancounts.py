@@ -4,6 +4,7 @@ import argparse
 import logging
 import json
 import datetime
+from lxml import etree
 
 import anticrlf
 from veracode_api_py import VeracodeAPI as vapi
@@ -15,7 +16,7 @@ def setup_logger():
     handler.setFormatter(anticrlf.LogFormatter('%(asctime)s - %(levelname)s - %(funcName)s - %(message)s'))
     logger = logging.getLogger(__name__)
     logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
 def creds_expire_days_warning():
     creds = vapi().get_creds()
@@ -32,6 +33,7 @@ def get_incomplete_scans(app_info):
     appscancount = 0
     #first check state of policy scan
     this_app_guid = app_info.get('guid')
+    this_app_id = app_info.get('id')
     log.debug('Checking application guid {} named {} for scan status'.format(this_app_guid, app_info.get('profile').get('name')))
     scans = app_info["scans"]
 
@@ -45,17 +47,29 @@ def get_incomplete_scans(app_info):
         static_scan = None
 
     #then check for sandboxes
-    appscancount += get_incomplete_sandbox_scans(this_app_guid)
+        appscancount += get_incomplete_sandbox_scans(this_app_guid, this_app_id)
     return appscancount
 
-def get_incomplete_sandbox_scans(this_app_guid):
-    sandboxes = vapi().get_sandbox_list(this_app_guid)
+def get_incomplete_sandbox_scans(this_app_guid, this_app_id):
+    sandboxes = vapi().get_app_sandboxes(this_app_guid)
 
     sandboxscancount = 0
 
     for sandbox in sandboxes:
+        log.debug("Checking sandboxes for application guid {}".format(this_app_guid))
         #check sandbox scan list, need to fall back to XML APIs for this part
         sandboxscancount = 0
+        sandboxid = sandbox.get('id')
+        data = vapi().get_build_info(app_id=this_app_id, sandbox_id=sandboxid) #returns most recent build for sandbox
+
+        builds = etree.fromstring(data)
+        buildid = builds[0].get('build_id')
+        log.debug("Checking application guid {}, sandbox {}, build {}".format(this_app_guid, sandboxid, buildid))
+        status = builds[0].get('results_ready')
+
+        if status == 'false':
+            log.info("Status for sandbox scan {} in sandbox id {} for application {} was {}".format(buildid, sandboxid, this_app_guid, status))
+            sandboxscancount += 1
 
     return sandboxscancount
 
@@ -72,21 +86,29 @@ def main():
     # CHECK FOR CREDENTIALS EXPIRATION
     creds_expire_days_warning()
 
-    count=0
+    appcount=0
+    scancount=0
 
     if checkall:
         applist = get_all_apps()
-        log.info("Checking {} applications for incomplete scans".format(len(applist)))
+        status = "Checking {} applications for incomplete scans".format(len(applist))
+        log.info(status)
+        print(status)
         for app in applist:
-            count += get_incomplete_scans(app)
+            this_app_scans = get_incomplete_scans(app)
+            if this_app_scans > 0:
+                appcount +=1
+                scancount += this_app_scans
     elif appguid != None:
-        count += get_incomplete_scans(appguid)
+        scancount += get_incomplete_scans(appguid)
+        if scancount > 0:
+            appcount = 1
     else:
         print('You must provide either an application guid or check all applications.')
         return
     
-    print("Identified {} applications with incomplete scans. See vcscancounts.log for details.".format(count))
-    log.info("Identified {} applications with incomplete scans."format(count))
+    print("Identified {} applications with {} incomplete scans. See vcscancounts.log for details.".format(appcount,scancount))
+    log.info("Identified {} applications with {} incomplete scans.".format(appcount,scancount))
     
 if __name__ == '__main__':
     setup_logger()
